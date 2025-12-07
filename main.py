@@ -153,9 +153,11 @@ def update_fires(fires_list, units_list, dt_seconds=5):
         for u in engaged_units:
             distance = haversine_distance(u["lat"], u["lon"], fire["lat"], fire["lon"])
             if distance <= fire["radius"] + 5:
-                # Чем ближе, тем сильнее влияние
-                suppression = max(0.5, (fire["radius"] - distance) / max(fire["radius"], 1))
-                fire["intensity"] = max(0.0, fire["intensity"] - suppression * dt_seconds * 2)
+                # Чем ближе, тем сильнее влияние воды и пены
+                proximity_factor = max(0.5, (fire["radius"] - distance) / max(fire["radius"], 1))
+                suppression_power = 1.2 * proximity_factor
+                fire["intensity"] = max(0.0, fire["intensity"] - suppression_power * dt_seconds * 2)
+                fire["radius"] = max(10.0, fire["radius"] - suppression_power * dt_seconds * 0.6)
 
         if fire["intensity"] <= 1.0:
             fire["active"] = False
@@ -199,13 +201,13 @@ def update_units(units_list, fires_list, dt_seconds=5):
             step_dx = unit_dir_x * step
             step_dy = unit_dir_y * step
             delta_lat, delta_lon = _meters_to_degrees(step_dx, step_dy, lat)
-            u["lat"] += delta_lon
-            u["lon"] += delta_lat
+            u["lat"] += delta_lat
+            u["lon"] += delta_lon
             u["moving"] = True
             u["status"] = "следует к очагу"
         else:
             u["moving"] = False
-            u["status"] = "работает у очага"
+            u["status"] = "тушит очаг"
 
         # Тепловое воздействие и нагрузка
         heat_factor = max(0.0, fire["intensity"] * max(0.0, (fire["radius"] - distance) / max(fire["radius"], 1)))
