@@ -1,4 +1,10 @@
-import os, time, random, json, webbrowser
+import math
+import os
+import time
+import random
+import json
+import webbrowser
+
 import folium
 from folium import Element
 
@@ -24,94 +30,196 @@ else:
     # Координаты по умолчанию (например, центр Москвы)
     center_lat, center_lon = 55.751244, 37.618423
 
-# Список бойцов (инициализация либо из конфига, либо генерация случайных)
-units = []
-if "firefighters" in config and isinstance(config["firefighters"], list):
-    for i, unit in enumerate(config["firefighters"]):
-        name = unit.get("name") or f"Боец {i+1}"
-        # Координаты: обязательны для отображения; если нет, используем центр + случайное смещение
-        lat = unit.get("lat")
-        lon = unit.get("lon")
-        if lat is None or lon is None:
-            # небольшое случайное смещение от центра, ~в пределах нескольких сотен метров
-            lat = center_lat + random.uniform(-0.005, 0.005)
-            lon = center_lon + random.uniform(-0.005, 0.005)
-        # Температура и пульс: если не заданы, генерируем начальные значения
-        temp = unit.get("temp")
-        if temp is None:
-            temp = random.uniform(20, 40)  # начальная температура окружающей среды, градусы Цельсия
-        pulse = unit.get("pulse")
-        if pulse is None:
-            pulse = random.randint(60, 100)  # начальный пульс
-        moving = unit.get("moving")
-        if moving is None:
-            moving = bool(random.getrandbits(1))  # случайно движется или нет
-        units.append({
+def _degrees_to_meters(lat_diff, lon_diff, lat_origin):
+    """Преобразует разницу широты/долготы в метры (приближённо)."""
+
+    meters_per_deg_lat = 111_320  # средняя величина
+    meters_per_deg_lon = 111_320 * math.cos(math.radians(lat_origin))
+    return lat_diff * meters_per_deg_lat, lon_diff * meters_per_deg_lon
+
+
+def _meters_to_degrees(dx, dy, lat_origin):
+    """Преобразует сдвиг по метрам в градусы широты/долготы (приближённо)."""
+
+    meters_per_deg_lat = 111_320
+    meters_per_deg_lon = 111_320 * math.cos(math.radians(lat_origin))
+    return dy / meters_per_deg_lat, dx / meters_per_deg_lon
+
+
+def haversine_distance(lat1, lon1, lat2, lon2):
+    """Возвращает расстояние между двумя точками в метрах (приближённо)."""
+
+    dx_lat, dx_lon = _degrees_to_meters(lat2 - lat1, lon2 - lon1, (lat1 + lat2) / 2)
+    return math.hypot(dx_lat, dx_lon)
+
+
+# ===== Начальные сценарии пожара и бойцов =====
+def create_initial_fires():
+    fires_cfg = config.get("fires")
+    fires_list = []
+    if isinstance(fires_cfg, list) and fires_cfg:
+        for i, f in enumerate(fires_cfg, start=1):
+            lat = f.get("lat", center_lat + random.uniform(-0.002, 0.002))
+            lon = f.get("lon", center_lon + random.uniform(-0.002, 0.002))
+            fires_list.append({
+                "id": f.get("id", i),
+                "name": f.get("name", f"Очаг {i}"),
+                "lat": float(lat),
+                "lon": float(lon),
+                "radius": float(f.get("radius", 60.0)),  # метры
+                "intensity": float(f.get("intensity", 80.0)),
+                "spread_rate": float(f.get("spread_rate", 0.8)),  # м/с
+                "decay_rate": float(f.get("decay_rate", 0.05)),  # снижение интенсивности за секунду
+                "active": True,
+            })
+    else:
+        # Один очаг рядом с центром
+        fires_list.append({
+            "id": 1,
+            "name": "Очаг 1",
+            "lat": center_lat + 0.001,
+            "lon": center_lon,
+            "radius": 70.0,
+            "intensity": 90.0,
+            "spread_rate": 0.9,
+            "decay_rate": 0.05,
+            "active": True,
+        })
+    return fires_list
+
+
+def create_initial_units():
+    units_list = []
+    if "firefighters" in config and isinstance(config["firefighters"], list):
+        base_units = config["firefighters"]
+    else:
+        base_units = []
+        for i in range(5):
+            base_units.append({
+                "name": f"Боец {i+1}",
+                "lat": center_lat + random.uniform(-0.005, 0.005),
+                "lon": center_lon + random.uniform(-0.005, 0.005),
+            })
+
+    for i, unit in enumerate(base_units, start=1):
+        name = unit.get("name") or f"Боец {i}"
+        lat = unit.get("lat", center_lat)
+        lon = unit.get("lon", center_lon)
+        units_list.append({
             "name": name,
             "lat": float(lat),
             "lon": float(lon),
-            "temp": float(temp),
-            "pulse": float(pulse),
-            "moving": bool(moving)
+            "temp": 22.0,
+            "pulse": 75.0,
+            "moving": True,
+            "status": "на выезде",
+            "target_fire": None,
         })
-else:
-    # Если конфигурация не задана, создаём 5 бойцов с случайными начальными параметрами
-    for i in range(5):
-        name = f"Боец {i+1}"
-        # размещаем вокруг центра в пределах ~0.005 градуса (порядка нескольких сотен метров)
-        lat = center_lat + random.uniform(-0.005, 0.005)
-        lon = center_lon + random.uniform(-0.005, 0.005)
-        temp = random.uniform(20, 40)    # стартовая температура (°C)
-        pulse = random.randint(60, 100)  # стартовый пульс
-        moving = True  # по умолчанию считаем, что движется
-        units.append({"name": name, "lat": lat, "lon": lon, "temp": temp, "pulse": pulse, "moving": moving})
+    return units_list
 
-# ===== Функция для обновления состояния бойцов (имитация датчиков и движения) =====
-def update_units(units_list):
-    """Обновляет параметры каждого бойца: координаты, температуру, пульс, статус движения."""
+
+fires = create_initial_fires()
+units = create_initial_units()
+
+def choose_target_fire(unit, fires_list):
+    """Назначает ближайший активный пожар в качестве цели."""
+
+    active_fires = [f for f in fires_list if f["active"]]
+    if not active_fires:
+        unit["target_fire"] = None
+        unit["status"] = "ожидание"
+        return None
+
+    closest = min(active_fires, key=lambda f: haversine_distance(unit["lat"], unit["lon"], f["lat"], f["lon"]))
+    unit["target_fire"] = closest["id"]
+    return closest
+
+
+def update_fires(fires_list, units_list, dt_seconds=5):
+    """Распространение и ослабление очагов с учётом работы бойцов."""
+
+    for fire in fires_list:
+        if not fire["active"]:
+            continue
+
+        # Расширение радиуса от ветра/топлива
+        fire["radius"] += fire["spread_rate"] * dt_seconds
+
+        # Снижение интенсивности от естественного выгорания
+        fire["intensity"] = max(0.0, fire["intensity"] - fire["decay_rate"] * dt_seconds)
+
+        # Если рядом работают бойцы – активное тушение
+        engaged_units = [u for u in units_list if u.get("target_fire") == fire["id"]]
+        for u in engaged_units:
+            distance = haversine_distance(u["lat"], u["lon"], fire["lat"], fire["lon"])
+            if distance <= fire["radius"] + 5:
+                # Чем ближе, тем сильнее влияние
+                suppression = max(0.5, (fire["radius"] - distance) / max(fire["radius"], 1))
+                fire["intensity"] = max(0.0, fire["intensity"] - suppression * dt_seconds * 2)
+
+        if fire["intensity"] <= 1.0:
+            fire["active"] = False
+            fire["radius"] = max(fire["radius"], 20.0)
+
+    return fires_list
+
+
+def update_units(units_list, fires_list, dt_seconds=5):
+    """Обновляет координаты и показатели бойцов исходя из симуляции пожара."""
+
+    speed_m_s = 1.2  # средняя скорость движения
+    engage_distance = 25.0
+    ambient_temp = 22.0
+
     for u in units_list:
-        # С небольшим шансом переключаем статус движения (начал двигаться или остановился)
-        if random.random() < 0.1:
-            u["moving"] = not u["moving"]
-        if u["moving"]:
-            # Если боец движется, смещаем координаты случайно (шагаем на небольшое расстояние)
-            u["lat"] += random.uniform(-0.0005, 0.0005)
-            u["lon"] += random.uniform(-0.0005, 0.0005)
-        # Обновляем температуру: небольшие случайные колебания
-        u["temp"] += random.uniform(-0.5, 0.5)
-        # Не даём температуре упасть ниже 0
-        if u["temp"] < 0:
-            u["temp"] = 0
-        # С вероятностью 5% имитируем резкий скачок температуры выше порога (например, попадание в огонь)
-        if u["temp"] < 55 and random.random() < 0.05:
-            u["temp"] = random.uniform(61, 80)
-        # Если температура уже высокая, с шансом 10% "остывает" ниже порога
-        if u["temp"] > 60 and random.random() < 0.1:
-            u["temp"] = random.uniform(40, 55)
-        # Обновляем пульс: если движется, может повышаться, если нет – немного снижаться
-        if u["moving"]:
-            u["pulse"] += random.randint(0, 5)
+        fire = choose_target_fire(u, fires_list)
+
+        if fire is None:
+            u["moving"] = False
+            u["temp"] = ambient_temp
+            u["pulse"] = max(60.0, u.get("pulse", 70.0) - 1)
+            continue
+
+        distance = haversine_distance(u["lat"], u["lon"], fire["lat"], fire["lon"])
+        lat = u["lat"]
+        lon = u["lon"]
+
+        if distance > engage_distance:
+            # Двигаемся к цели
+            step = min(speed_m_s * dt_seconds, distance)
+            dy = fire["lat"] - lat
+            dx = fire["lon"] - lon
+            dy_m, dx_m = _degrees_to_meters(dy, dx, lat)
+            if dx_m == 0 and dy_m == 0:
+                unit_dir_x = unit_dir_y = 0
+            else:
+                length = math.hypot(dx_m, dy_m)
+                unit_dir_x = dx_m / length
+                unit_dir_y = dy_m / length
+            step_dx = unit_dir_x * step
+            step_dy = unit_dir_y * step
+            delta_lat, delta_lon = _meters_to_degrees(step_dx, step_dy, lat)
+            u["lat"] += delta_lon
+            u["lon"] += delta_lat
+            u["moving"] = True
+            u["status"] = "следует к очагу"
         else:
-            u["pulse"] -= random.randint(0, 3)
-        # Небольшое случайное колебание пульса
-        u["pulse"] += random.randint(-2, 2)
-        # Ограничиваем пульс реалистичными пределами
-        if u["pulse"] < 40:
-            u["pulse"] = 40
-        if u["pulse"] > 200:
-            u["pulse"] = 200
-        # С 5% вероятностью — всплеск пульса (выше порога 140, если до сих пор низкий)
-        if u["pulse"] < 130 and random.random() < 0.05:
-            u["pulse"] = random.randint(145, 170)
-        # Если пульс высок (тревога), с 10% шансом спад до нормального уровня (имитация отдыха/остывания)
-        if u["pulse"] > 140 and random.random() < 0.1:
-            u["pulse"] = random.randint(80, 120)
+            u["moving"] = False
+            u["status"] = "работает у очага"
+
+        # Тепловое воздействие и нагрузка
+        heat_factor = max(0.0, fire["intensity"] * max(0.0, (fire["radius"] - distance) / max(fire["radius"], 1)))
+        exertion = 5.0 if u["moving"] else 2.0
+        u["temp"] = min(80.0, ambient_temp + heat_factor * 0.6 + exertion)
+
+        pulse_base = 70.0
+        u["pulse"] = min(190.0, pulse_base + heat_factor * 0.8 + (15.0 if u["moving"] else 8.0))
+
     return units_list
 
 # ===== Функция для создания и сохранения карты с текущими данными =====
-def create_map(units_list):
-    """Создаёт интерактивную карту с маркерами для каждого бойца и сохраняет в файл map.html."""
-    # Создаём карту Folium, центрируем на заданных координатах
+def create_map(units_list, fires_list):
+    """Создаёт интерактивную карту с маркерами для каждого бойца и контурами пожара."""
     m = folium.Map(location=[center_lat, center_lon], zoom_start=14)
     # Добавляем мета-теги в <head> для автообновления и отключения кеширования
     meta_tags = (
@@ -121,6 +229,21 @@ def create_map(units_list):
         '<meta http-equiv="Expires" content="0"/>'
     )
     m.get_root().header.add_child(Element(meta_tags))
+
+    # Рисуем границы очагов
+    for fire in fires_list:
+        color = "red" if fire["active"] else "gray"
+        folium.Circle(
+            location=[fire["lat"], fire["lon"]],
+            radius=fire["radius"],
+            color=color,
+            fill=True,
+            fill_opacity=0.25,
+            popup=(f"{fire['name']}<br>Радиус: {int(fire['radius'])} м<br>"
+                   f"Интенсивность: {fire['intensity']:.1f}<br>"
+                   f"Статус: {'активен' if fire['active'] else 'ликвидирован'}"),
+        ).add_to(m)
+
     # Добавляем маркер для каждого пожарного
     for u in units_list:
         # Проверяем пороги для определения тревоги
@@ -133,8 +256,7 @@ def create_map(units_list):
             color = "green" if u["moving"] else "blue"
         # Значок маркера (иконка): используем стандартный "user" (можно заменить на другую подходящую иконку)
         icon = folium.Icon(color=color, icon="user")
-        # Статус движения текстом
-        status_text = "движется" if u["moving"] else "неподвижен"
+        status_text = u.get("status") or ("движется" if u["moving"] else "неподвижен")
         # Подготовка текста для тревоги
         alerts = []
         if alert_temp:
@@ -160,18 +282,17 @@ def create_map(units_list):
     m.save("map.html")
 
 # ===== Запуск отображения карты и цикла обновления =====
-# Сначала создаём начальную карту и открываем её в браузере
-create_map(units)
-# Открываем файл карты в браузере по умолчанию
+create_map(units, fires)
 webbrowser.open("file://" + os.path.abspath("map.html"))
-print("Карта открыта в браузере. Идёт имитация... (нажмите Ctrl+C для остановки)")
+print("Карта открыта в браузере. Запущена симуляция работы подразделений... (Ctrl+C для остановки)")
 
-# Главный цикл: обновление данных и карты каждые 5 секунд
+tick_seconds = 5
+
 try:
     while True:
-        time.sleep(5)            # ждем 5 секунд
-        units = update_units(units)  # обновляем параметры бойцов
-        create_map(units)        # создаём и сохраняем новую карту с обновленными данными
-        # (браузер автоматически перезагрузит страницу благодаря meta refresh)
+        time.sleep(tick_seconds)
+        fires = update_fires(fires, units, dt_seconds=tick_seconds)
+        units = update_units(units, fires, dt_seconds=tick_seconds)
+        create_map(units, fires)
 except KeyboardInterrupt:
     print("\nОстановка симуляции. Скрипт завершён.")
