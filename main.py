@@ -1,9 +1,4 @@
-import os
-import time
-import random
-import json
-import webbrowser
-
+import os, time, random, json, webbrowser
 import folium
 from folium import Element
 
@@ -29,74 +24,28 @@ else:
     # Координаты по умолчанию (например, центр Москвы)
     center_lat, center_lon = 55.751244, 37.618423
 
-
-def select_operational_area(default_lat, default_lon):
-    """
-    Позволяет выбрать область работы (один пожар/РТП) перед стартом симуляции.
-    Возвращает словарь с границами и центром.
-    """
-
-    def build_area(north, south, west, east):
-        return {
-            "north": north,
-            "south": south,
-            "west": west,
-            "east": east,
-            "center_lat": (north + south) / 2,
-            "center_lon": (west + east) / 2,
-        }
-
-    def default_area(lat, lon):
-        # Квадрат ~1 км вокруг точки (0.01 градуса ≈ 1.1 км)
-        return build_area(lat + 0.01, lat - 0.01, lon - 0.01, lon + 0.01)
-
-    print("=== Выбор участка местности для конкретного пожара ===")
-    print("Для каждого РТП можно выбрать отдельный участок. \n"
-          "По умолчанию берётся квадрат ~1 км вокруг центра карты.")
-    try:
-        use_custom = input("Задать участок вручную? (y/N): ").strip().lower()
-    except EOFError:
-        use_custom = ""
-
-    if use_custom == "y":
-        try:
-            north = float(input("Введите северную границу (широта): "))
-            south = float(input("Введите южную границу (широта): "))
-            west = float(input("Введите западную границу (долгота): "))
-            east = float(input("Введите восточную границу (долгота): "))
-            if north <= south or east <= west:
-                print("Границы заданы некорректно. Используем значения по умолчанию.")
-                return default_area(default_lat, default_lon)
-            return build_area(north, south, west, east)
-        except (ValueError, EOFError):
-            print("Не удалось разобрать координаты. Используем участок по умолчанию.")
-            return default_area(default_lat, default_lon)
-    else:
-        return default_area(default_lat, default_lon)
-
-
-operational_area = select_operational_area(center_lat, center_lon)
-center_lat, center_lon = operational_area["center_lat"], operational_area["center_lon"]
-
 # Список бойцов (инициализация либо из конфига, либо генерация случайных)
 units = []
 if "firefighters" in config and isinstance(config["firefighters"], list):
     for i, unit in enumerate(config["firefighters"]):
         name = unit.get("name") or f"Боец {i+1}"
+        # Координаты: обязательны для отображения; если нет, используем центр + случайное смещение
         lat = unit.get("lat")
         lon = unit.get("lon")
         if lat is None or lon is None:
-            lat = random.uniform(operational_area["south"], operational_area["north"])
-            lon = random.uniform(operational_area["west"], operational_area["east"])
+            # небольшое случайное смещение от центра, ~в пределах нескольких сотен метров
+            lat = center_lat + random.uniform(-0.005, 0.005)
+            lon = center_lon + random.uniform(-0.005, 0.005)
+        # Температура и пульс: если не заданы, генерируем начальные значения
         temp = unit.get("temp")
         if temp is None:
-            temp = random.uniform(20, 40)
+            temp = random.uniform(20, 40)  # начальная температура окружающей среды, градусы Цельсия
         pulse = unit.get("pulse")
         if pulse is None:
-            pulse = random.randint(60, 100)
+            pulse = random.randint(60, 100)  # начальный пульс
         moving = unit.get("moving")
         if moving is None:
-            moving = bool(random.getrandbits(1))
+            moving = bool(random.getrandbits(1))  # случайно движется или нет
         units.append({
             "name": name,
             "lat": float(lat),
@@ -106,16 +55,16 @@ if "firefighters" in config and isinstance(config["firefighters"], list):
             "moving": bool(moving)
         })
 else:
-    # Если конфигурация не задана, создаём 5 бойцов с случайными начальными параметрами внутри участка
+    # Если конфигурация не задана, создаём 5 бойцов с случайными начальными параметрами
     for i in range(5):
         name = f"Боец {i+1}"
-        lat = random.uniform(operational_area["south"], operational_area["north"])
-        lon = random.uniform(operational_area["west"], operational_area["east"])
+        # размещаем вокруг центра в пределах ~0.005 градуса (порядка нескольких сотен метров)
+        lat = center_lat + random.uniform(-0.005, 0.005)
+        lon = center_lon + random.uniform(-0.005, 0.005)
         temp = random.uniform(20, 40)    # стартовая температура (°C)
         pulse = random.randint(60, 100)  # стартовый пульс
         moving = True  # по умолчанию считаем, что движется
         units.append({"name": name, "lat": lat, "lon": lon, "temp": temp, "pulse": pulse, "moving": moving})
-
 
 # ===== Функция для обновления состояния бойцов (имитация датчиков и движения) =====
 def update_units(units_list):
@@ -128,9 +77,6 @@ def update_units(units_list):
             # Если боец движется, смещаем координаты случайно (шагаем на небольшое расстояние)
             u["lat"] += random.uniform(-0.0005, 0.0005)
             u["lon"] += random.uniform(-0.0005, 0.0005)
-        # Не выходим за границы выбранного участка
-        u["lat"] = max(min(u["lat"], operational_area["north"]), operational_area["south"])
-        u["lon"] = max(min(u["lon"], operational_area["east"]), operational_area["west"])
         # Обновляем температуру: небольшие случайные колебания
         u["temp"] += random.uniform(-0.5, 0.5)
         # Не даём температуре упасть ниже 0
@@ -162,91 +108,11 @@ def update_units(units_list):
             u["pulse"] = random.randint(80, 120)
     return units_list
 
-
-def simulate_fire_spread(area, origin, base_growth=0.003):
-    """Имитация прогноза распространения огня по направлениям с поправкой на ветер."""
-
-    def wind_modifier(direction_name):
-        wind_dir = (config.get("wind_direction") or "N").upper()
-        speed = float(config.get("wind_speed_kmh") or 10)
-        # Простая шкала влияния ветра: направление совпадает с ветром -> +100% при сильном ветре,
-        # боковые направления получают меньший бонус.
-        main_map = {
-            "N": "N",
-            "NE": "NE",
-            "E": "E",
-            "SE": "SE",
-            "S": "S",
-            "SW": "SW",
-            "W": "W",
-            "NW": "NW",
-        }
-        target = main_map.get(wind_dir, "N")
-        if direction_name == target:
-            return 1 + min(speed / 20, 1.0)  # до +100% при сильном ветре
-        if direction_name in (target + "E", target + "W") or target in (direction_name + "E", direction_name + "W"):
-            return 1 + min(speed / 50, 0.4)  # боковое влияние
-        return 1
-
-    direction_vectors = {
-        "N": (0, 1),
-        "NE": (1, 1),
-        "E": (1, 0),
-        "SE": (1, -1),
-        "S": (0, -1),
-        "SW": (-1, -1),
-        "W": (-1, 0),
-        "NW": (-1, 1),
-    }
-
-    predictions = []
-    for direction, (dx, dy) in direction_vectors.items():
-        growth = base_growth * (0.5 + random.random()) * wind_modifier(direction)
-        dest_lat = origin[0] + dy * growth
-        dest_lon = origin[1] + dx * growth
-        # Обрезаем прогноз до выбранного участка
-        dest_lat = max(min(dest_lat, area["north"]), area["south"])
-        dest_lon = max(min(dest_lon, area["east"]), area["west"])
-        predictions.append({
-            "direction": direction,
-            "intensity": growth,
-            "dest": (dest_lat, dest_lon),
-        })
-
-    predictions.sort(key=lambda x: x["intensity"], reverse=True)
-    return predictions
-
-
-def suggest_unit_allocation(units_list, predictions):
-    """Рекомендует распределение подразделений по направлениям наиболее вероятного роста огня."""
-    if not predictions:
-        return {}
-
-    top_directions = [p["direction"] for p in predictions[:3]]
-    allocations = {d: [] for d in top_directions}
-    for idx, unit in enumerate(units_list):
-        direction = top_directions[idx % len(top_directions)]
-        allocations[direction].append(unit["name"])
-    return allocations
-
-
 # ===== Функция для создания и сохранения карты с текущими данными =====
-def create_map(units_list, predictions, allocations):
-    """Создаёт интерактивную карту с маркерами для бойцов, прогнозом и сохраняет в файл map.html."""
-    # Создаём карту Folium, центрируем на выбранном участке
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=15)
-    folium.Rectangle(
-        bounds=[
-            [operational_area["north"], operational_area["west"]],
-            [operational_area["south"], operational_area["east"]],
-        ],
-        color="orange",
-        fill=True,
-        fill_opacity=0.05,
-        weight=2,
-        tooltip="Рабочий участок",
-    ).add_to(m)
-
+def create_map(units_list):
+    """Создаёт интерактивную карту с маркерами для каждого бойца и сохраняет в файл map.html."""
+    # Создаём карту Folium, центрируем на заданных координатах
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=14)
     # Добавляем мета-теги в <head> для автообновления и отключения кеширования
     meta_tags = (
         '<meta http-equiv="refresh" content="5" />'  # авто-обновление страницы каждые 5 сек
@@ -283,51 +149,19 @@ def create_map(units_list, predictions, allocations):
                       f"Статус: {status_text}<br>"
                       f"Тревоги: {alert_text}")
         folium.Marker(location=[u["lat"], u["lon"]], icon=icon, popup=popup_html).add_to(m)
-
-    # Маркер очага пожара (центр участка)
-    folium.Marker(
-        location=[operational_area["center_lat"], operational_area["center_lon"]],
-        icon=folium.Icon(color="orange", icon="fire"),
-        popup="Очаг пожара",
-    ).add_to(m)
-
-    # Визуализация прогноза распространения
-    colors = ["red", "darkred", "orange", "darkorange", "purple", "darkpurple", "cadetblue", "blue"]
-    for idx, pred in enumerate(predictions):
-        folium.PolyLine(
-            locations=[
-                [operational_area["center_lat"], operational_area["center_lon"]],
-                [pred["dest"][0], pred["dest"][1]],
-            ],
-            color=colors[idx % len(colors)],
-            weight=4,
-            tooltip=f"Направление {pred['direction']}: прогноз роста {pred['intensity']*1000:.1f} м",
-        ).add_to(m)
-
-    # Блок рекомендаций по распределению
-    allocation_lines = []
-    for direction, names in allocations.items():
-        if names:
-            allocation_lines.append(f"{direction}: {', '.join(names)}")
-    allocation_text = "<br>".join(allocation_lines) if allocation_lines else "Нет данных о распределении"
-
     # (Опционально) можно добавить отображение времени обновления
     now = time.strftime("%H:%M:%S")
     title_html = (f'<div style="position: fixed; top: 10px; left: 10px; z-index: 1000; '
                   f'background-color: white; padding: 5px; font-size: 14px;">'
-                  f'Обновлено: {now}<br>'
-                  f'Рекомендации:<br>{allocation_text}'
+                  f'Обновлено: {now}'
                   f'</div>')
     m.get_root().html.add_child(Element(title_html))
     # Сохраняем карту в HTML-файл
     m.save("map.html")
 
-
 # ===== Запуск отображения карты и цикла обновления =====
 # Сначала создаём начальную карту и открываем её в браузере
-initial_predictions = simulate_fire_spread(operational_area, (center_lat, center_lon))
-initial_allocations = suggest_unit_allocation(units, initial_predictions)
-create_map(units, initial_predictions, initial_allocations)
+create_map(units)
 # Открываем файл карты в браузере по умолчанию
 webbrowser.open("file://" + os.path.abspath("map.html"))
 print("Карта открыта в браузере. Идёт имитация... (нажмите Ctrl+C для остановки)")
@@ -337,9 +171,7 @@ try:
     while True:
         time.sleep(5)            # ждем 5 секунд
         units = update_units(units)  # обновляем параметры бойцов
-        predictions = simulate_fire_spread(operational_area, (center_lat, center_lon))
-        allocations = suggest_unit_allocation(units, predictions)
-        create_map(units, predictions, allocations)        # создаём и сохраняем новую карту с обновленными данными
+        create_map(units)        # создаём и сохраняем новую карту с обновленными данными
         # (браузер автоматически перезагрузит страницу благодаря meta refresh)
 except KeyboardInterrupt:
     print("\nОстановка симуляции. Скрипт завершён.")
