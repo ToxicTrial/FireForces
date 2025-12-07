@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Мониторинг пожарных подразделений</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background-color: #1e1e2e; color: #fff; margin: 0; padding: 20px; }
+        h1 { text-align: center; color: #a6e3a1; margin-bottom: 30px; }
+        
+        .container { display: flex; gap: 30px; justify-content: center; align-items: flex-start; }
+        
+        /* Секция карты */
+        .map-wrapper { text-align: center; }
+        canvas { background-color: #313244; border: 2px solid #585b70; border-radius: 8px; cursor: crosshair; box-shadow: 0 4px 15px rgba(0,0,0,0.3); }
+        
+        /* Секция данных */
+        .data-section { width: 450px; }
+        .card { background: #313244; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #45475a; }
+        
+        /* Таблица с прокруткой для большого кол-ва бойцов */
+        .table-container { max-height: 400px; overflow-y: auto; }
+        table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        thead { position: sticky; top: 0; background: #313244; z-index: 2; }
+        th, td { text-align: left; padding: 8px 5px; border-bottom: 1px solid #45475a; }
+        th { color: #89b4fa; }
+        
+        /* Статусы */
+        .status-ok { color: #a6e3a1; }
+        .status-warning { color: #f9e2af; font-weight: bold; }
+        .status-critical { color: #f38ba8; font-weight: bold; animation: blink 1s infinite; }
+        
+        /* Метки отрядов */
+        .badge { padding: 2px 6px; border-radius: 4px; font-size: 12px; font-weight: bold; color: #111; }
+
+        @keyframes blink { 50% { opacity: 0.5; } }
+
+        .alert-box {
+            background: #f38ba8; color: #111; padding: 15px; 
+            border-radius: 8px; display: none; margin-bottom: 20px; 
+            text-align: center; font-weight: bold; font-size: 18px;
+            box-shadow: 0 0 15px #f38ba8;
+        }
+
+        button {
+            width: 100%; padding: 12px; background: #fab387; border: none; 
+            color: #111; font-weight: bold; border-radius: 5px; cursor: pointer; transition: 0.2s;
+        }
+        button:hover { background: #f9e2af; }
+    </style>
+</head>
+<body>
+
+    <h1>🚑 Интеллектуальная система управления пожарными силами</h1>
+
+    <div class="alert-box" id="globalAlert">🚨 ВНИМАНИЕ: КРИТИЧЕСКОЕ СОСТОЯНИЕ ЛИЧНОГО СОСТАВА!</div>
+
+    <div class="container">
+        <!-- Карта -->
+        <div class="map-wrapper">
+            <canvas id="fireMap" width="500" height="500"></canvas>
+            <p style="color: #7f849c; margin-top: 10px;">Левая кнопка мыши — поджог</p>
+        </div>
+
+        <!-- Панель мониторинга -->
+        <div class="data-section">
+            <div class="card">
+                <button onclick="startRandomFire()">🔥 Имитация случайного возгорания</button>
+            </div>
+            
+            <div class="card">
+                <h3 style="margin-top:0;">Сводка по отрядам</h3>
+                <div class="table-container">
+                    <table id="ffTable">
+                        <thead>
+                            <tr>
+                                <th>Отряд</th>
+                                <th>ID</th>
+                                <th>❤️ Пульс</th>
+                                <th>🌡️ T°C</th>
+                                <th>Статус</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- Данные JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('fireMap');
+        const ctx = canvas.getContext('2d');
+        const gridSize = 20;
+        const cellSize = canvas.width / gridSize;
+
+        function startRandomFire() {
+            fetch('/api/spark', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
+        }
+
+        canvas.onclick = function(event) {
+            const rect = canvas.getBoundingClientRect();
+            const x = Math.floor((event.clientX - rect.left) / cellSize);
+            const y = Math.floor((event.clientY - rect.top) / cellSize);
+            fetch('/api/spark', { 
+                method: 'POST', 
+                headers: {'Content-Type': 'application/json'}, 
+                body: JSON.stringify({x: x, y: y})
+            });
+        };
+
+        function drawMap(grid) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            for(let y=0; y<gridSize; y++) {
+                for(let x=0; x<gridSize; x++) {
+                    // Отрисовка огня
+                    if(grid[y][x] > 0) {
+                        const intensity = grid[y][x] / 100;
+                        // Градиент от желтого к красному
+                        const red = 255;
+                        const green = Math.floor(165 * (1 - intensity)); 
+                        ctx.fillStyle = `rgba(${red}, ${green}, 0, ${0.4 + intensity*0.6})`;
+                        ctx.fillRect(x*cellSize, y*cellSize, cellSize, cellSize);
+                    }
+                    // Сетка
+                    ctx.strokeStyle = '#383a4a';
+                    ctx.strokeRect(x*cellSize, y*cellSize, cellSize, cellSize);
+                }
+            }
+        }
+
+        function drawFirefighters(list) {
+            let criticalExists = false;
+            const tbody = document.querySelector('#ffTable tbody');
+            tbody.innerHTML = '';
+
+            // Сортируем по ID для порядка в таблице
+            list.sort((a,b) => a.id - b.id);
+
+            list.forEach(ff => {
+                // 1. Рисуем на карте
+                ctx.fillStyle = ff.color;
+                
+                // Рисуем круг (боец)
+                ctx.beginPath();
+                ctx.arc(ff.x*cellSize + cellSize/2, ff.y*cellSize + cellSize/2, cellSize/2.5, 0, Math.PI*2);
+                ctx.fill();
+                
+                // Если тушит - рисуем голубую рамку
+                if (ff.action === 'extinguishing') {
+                    ctx.strokeStyle = '#00ffff';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                    ctx.lineWidth = 1;
+                }
+
+                // ID бойца на карте
+                ctx.fillStyle = '#000';
+                ctx.font = 'bold 10px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(ff.id, ff.x*cellSize + cellSize/2, ff.y*cellSize + cellSize/2 + 3);
+
+                // 2. Добавляем в таблицу
+                const row = `<tr>
+                    <td><span class="badge" style="background-color: ${ff.color}">${ff.squad}</span></td>
+                    <td><b>${ff.id}</b></td>
+                    <td>${ff.pulse}</td>
+                    <td>${ff.temp.toFixed(1)}</td>
+                    <td class="status-${ff.status.toLowerCase()}">${ff.status}</td>
+                </tr>`;
+                tbody.innerHTML += row;
+
+                if (ff.status === 'CRITICAL') criticalExists = true;
+            });
+
+            const alertBox = document.getElementById('globalAlert');
+            alertBox.style.display = criticalExists ? 'block' : 'none';
+        }
+
+        function updateData() {
+            fetch('/api/data')
+                .then(res => res.json())
+                .then(data => {
+                    drawMap(data.grid);
+                    drawFirefighters(data.firefighters);
+                })
+                .catch(err => console.error(err));
+        }
+
+        // Обновление раз в секунду
+        setInterval(updateData, 1000);
+        updateData();
+    </script>
+</body>
+</html>
